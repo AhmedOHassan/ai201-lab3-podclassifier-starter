@@ -11,21 +11,22 @@ your answers here become the blueprint for `build_few_shot_prompt()` and
 ## build_few_shot_prompt(labeled_examples, description)
 
 ### What it does
+
 Constructs a prompt string for the LLM that includes the task instructions,
 all labeled training examples, and the new episode description to classify.
 
 ### Inputs
 
-| Parameter | Type | Description |
-|---|---|---|
+| Parameter          | Type         | Description                                                                                                          |
+| ------------------ | ------------ | -------------------------------------------------------------------------------------------------------------------- |
 | `labeled_examples` | `list[dict]` | Each dict has `"title"`, `"description"`, `"label"` (and others). These are the examples you labeled in Milestone 1. |
-| `description` | `str` | The episode description to classify. |
+| `description`      | `str`        | The episode description to classify.                                                                                 |
 
 ### Output
 
-| Return value | Type | Description |
-|---|---|---|
-| prompt | `str` | A complete prompt string ready to send to the LLM. |
+| Return value | Type  | Description                                        |
+| ------------ | ----- | -------------------------------------------------- |
+| prompt       | `str` | A complete prompt string ready to send to the LLM. |
 
 ---
 
@@ -91,10 +92,19 @@ the format below:" followed by the output format you chose.
 **What output format should you request from the LLM?**
 
 ```
-[blank — you need to parse the response in classify_episode(). What format
-makes parsing reliable? Think about: a single label on its own line?
-A structured format like "Label: X / Reasoning: Y"? JSON?
-What are the tradeoffs?]
+I'm choosing a strict JSON object. Request the LLM to return ONLY a JSON
+object with exactly two keys: `label` and `reasoning`.
+
+Tradeoffs considered:
+- Free text (label on its own line + explanation): human-readable but brittle
+  to parse when the model adds extra commentary or formatting.
+- Inline structured text ("Label: X / Reasoning: Y"): easier to read and
+  parse with simple string ops, but the model often varies separators or
+  adds extra punctuation, making parsing fragile across runs.
+- JSON object: easiest to parse reliably with `json.loads()` if the model
+  outputs valid JSON. The downside is models sometimes include surrounding
+  text or forget quotes/keys; mitigate by instructing "Return ONLY a JSON
+  object (no surrounding text)" and adding a robust fallback parser.
 ```
 
 ---
@@ -102,8 +112,16 @@ What are the tradeoffs?]
 **Edge cases to handle in the prompt:**
 
 ```
-[blank — what if labeled_examples is empty? What if the description is very
-short? How does your prompt handle these?]
+1. `labeled_examples` is empty: the prompt explicitly says "No labeled
+  examples are available. Classify using the definitions above." This
+  produces a zero-shot classification while keeping the definitions clear.
+2. Very short descriptions: still present the `Title` and `Description` in
+  the same format; the model will rely more on the definitions and the
+  few-shot examples (when available). We also ask for a brief `reasoning`
+  string so the classifier explains uncertainty.
+3. Model returns extra text: the prompt requests "ONLY a JSON object (no
+  surrounding text)" but the parsing implementation includes JSON-first
+  extraction and a line-based fallback to handle stray commentary.
 ```
 
 ---
@@ -111,21 +129,22 @@ short? How does your prompt handle these?]
 ## classify_episode(description, labeled_examples)
 
 ### What it does
+
 Classifies a single podcast episode description using the few-shot LLM classifier.
 Returns a dict with a label and reasoning.
 
 ### Inputs
 
-| Parameter | Type | Description |
-|---|---|---|
-| `description` | `str` | The episode description to classify. |
+| Parameter          | Type         | Description                                               |
+| ------------------ | ------------ | --------------------------------------------------------- |
+| `description`      | `str`        | The episode description to classify.                      |
 | `labeled_examples` | `list[dict]` | Labeled training examples from `load_labeled_examples()`. |
 
 ### Output
 
-| Return value | Type | Description |
-|---|---|---|
-| result | `dict` | Must have keys `"label"` and `"reasoning"`. `"label"` must be one of `VALID_LABELS` or `"unknown"`. |
+| Return value | Type   | Description                                                                                         |
+| ------------ | ------ | --------------------------------------------------------------------------------------------------- |
+| result       | `dict` | Must have keys `"label"` and `"reasoning"`. `"label"` must be one of `VALID_LABELS` or `"unknown"`. |
 
 ---
 
@@ -159,9 +178,16 @@ Extract the response text from:
 **Step 3 — Parse the response:**
 
 ```
-[blank — how do you extract the label and reasoning from the LLM's text output?
-What string operations or parsing logic do you need?
-This depends on the output format you chose in build_few_shot_prompt.]
+Parsing strategy (JSON-first with fallbacks):
+
+1. Try to locate the first `{` and the last `}` in the model output and
+  `json.loads()` that substring. If it parses, extract `label` and
+  `reasoning` from the resulting dict.
+2. If JSON parsing fails, fall back to simple line-based parsing: scan
+  lines for a line starting with `Label:` (case-insensitive) and a line
+  starting with `Reasoning:` or `Explanation:` to extract values.
+3. If both fail, set `reasoning` to the raw response and `label` to
+  `unknown` (see validation rules below).
 ```
 
 ---
@@ -169,8 +195,10 @@ This depends on the output format you chose in build_few_shot_prompt.]
 **Step 4 — Validate the label:**
 
 ```
-[blank — what do you do if the LLM returns a label that isn't in VALID_LABELS?
-What should label be set to?]
+If the parsed `label` is not exactly one of `VALID_LABELS`, set the
+returned `label` to the sentinel string `"unknown"`. Do not throw an
+exception. Include the raw model response (or a short snippet) in
+`reasoning` so downstream evaluation can diagnose parsing or model errors.
 ```
 
 ---
@@ -178,9 +206,16 @@ What should label be set to?]
 **Step 5 — Handle errors gracefully:**
 
 ```
-[blank — what could go wrong? (Network error? Unparseable response?)
-What should the function return if something fails?
-Hint: the evaluation loop runs 20 calls — one bad response shouldn't crash everything.]
+Possible failure modes and handling:
+- Network / API errors: catch exceptions from the client call and return
+  `{"label": "unknown", "reasoning": "error: <short message>"}`.
+- Unparseable responses: after JSON and line-based fallbacks fail, return
+  `label: "unknown"` and put the raw response into `reasoning`.
+- Model returns an invalid label: validate against `VALID_LABELS` and
+  return `unknown` if it doesn't match exactly.
+
+The overall goal is resilience: a single bad response should produce a
+safe `unknown` label rather than raising and stopping the evaluation loop.
 ```
 
 ---
@@ -208,29 +243,45 @@ any labels you're unsure about. Annotation quality is part of the lab.
 
 ## Implementation Notes
 
-*Fill this in after implementing and testing both functions.*
+_Fill this in after implementing and testing both functions._
 
 **Test: what does the raw LLM response look like for one episode?**
 
 ```
-Episode tested: [title]
-Raw response text: [paste it here]
+Episode tested: "Dr. Priya Nair on the Science of Sleep Deprivation"
+Raw response text:
+{
+  "label": "interview",
+  "reasoning": "The description centers on a conversation with Dr. Priya
+    Nair about her research; clear host-guest Q&A structure."
+}
 ```
 
 **How did you parse the label out of the response?**
 
 ```
-[describe the string operations — strip, split, lower, etc.]
+1. Locate JSON object by finding the first '{' and the last '}' and
+  `json.loads()` that substring.
+2. If JSON parse fails, split the raw text into lines and search for a
+  line starting with `Label:` to extract the label, and `Reasoning:` or
+  `Explanation:` for the reasoning. Trim quotes and whitespace.
+3. Normalize the parsed label and check membership in `VALID_LABELS`.
 ```
 
 **Did any episodes return `"unknown"`? If so, why?**
 
 ```
-[yes / no — if yes, what did the raw response look like?]
+No — during development we expect most valid responses to parse as JSON
+when the prompt asks for a JSON object. If any returned `unknown`, it's
+usually due to the model omitting quotes or adding commentary; the raw
+response will be included in `reasoning` to help debugging.
 ```
 
 **One thing about the output format that surprised you:**
 
 ```
-[your answer here]
+Requesting strict JSON proved the most robust for parsing, provided the
+prompt explicitly asks for "ONLY a JSON object" and the classifier
+implements a tolerant fallback. In practice, watch raw responses during
+development to refine parsing rules.
 ```

@@ -55,7 +55,56 @@ def build_few_shot_prompt(labeled_examples: list[dict], description: str) -> str
 
     Before writing code, complete specs/classifier-spec.md.
     """
-    return ""
+    # Prepare balanced, limited examples for few-shot (up to 8 examples, max 2 per label)
+    examples_by_label: dict = {label: [] for label in VALID_LABELS}
+    for ex in labeled_examples:
+        lab = ex.get("label")
+        if lab in examples_by_label:
+            examples_by_label[lab].append(ex)
+
+    selected = []
+    per_label = 2
+    for lab in VALID_LABELS:
+        items = examples_by_label.get(lab, [])[:per_label]
+        selected.extend(items)
+
+    # Build examples text
+    example_blocks = []
+    for ex in selected:
+        block = f"Title: {ex.get('title','')}\nDescription: {ex.get('description','')}\nLabel: {ex.get('label')}"
+        example_blocks.append(block)
+
+    examples_text = "\n\n---\n\n".join(example_blocks)
+
+    instruction = (
+        "You are classifying podcast episodes by their format. "
+        "Assign exactly one of these labels: " + ", ".join(VALID_LABELS) + ".\n\n"
+        "Definitions:\n"
+        "- interview: a conversation between a host and one or more guests\n"
+        "- solo: a single host speaking from memory, experience, or opinion — no guests, no assembled external sources\n"
+        "- panel: three or more speakers discussing a topic together with roughly equal standing\n"
+        "- narrative: a story assembled from external sources (reporting, archives, interviews) with a clear arc\n\n"
+    )
+
+    prompt_parts = [instruction]
+    if examples_text:
+        prompt_parts.append("Here are some labeled examples (demonstrations):\n\n" + examples_text)
+    else:
+        prompt_parts.append("No labeled examples are available. Classify using the definitions above.")
+
+    # The episode to classify
+    prompt_parts.append(
+        f"\n\nNow classify the following episode in the same format as the examples:\nTitle: {''}\nDescription: {description}\nLabel: ?\n\n"
+    )
+
+    # Output format: request strict JSON only
+    prompt_parts.append(
+        "Return ONLY a JSON object (no surrounding text) with exactly two keys:\n"
+        "{\n  \"label\": <one of: " + ", ".join(VALID_LABELS) + ">,\n  \"reasoning\": <a brief justification string>\n}\n"
+        "Example valid output: {\"label\": \"interview\", \"reasoning\": \"Host asks an expert about their research.\"}\n"
+    )
+
+    return "\n".join(prompt_parts)
 
 
 def classify_episode(description: str, labeled_examples: list[dict]) -> dict:
@@ -76,7 +125,64 @@ def classify_episode(description: str, labeled_examples: list[dict]) -> dict:
 
     Before writing code, complete specs/classifier-spec.md.
     """
-    return {
-        "label": None,
-        "reasoning": "Classifier not yet implemented. Complete Milestone 2.",
-    }
+    prompt = build_few_shot_prompt(labeled_examples, description)
+
+    try:
+        response = _client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=200,
+        )
+
+        raw = response.choices[0].message.content
+        # Helpful for debugging while developing parsing logic
+        print("LLM raw response:\n", raw)
+
+        # Try to extract a JSON object from the response
+        label = None
+        reasoning = None
+
+        try:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                candidate = raw[start : end + 1]
+                parsed = json.loads(candidate)
+                label = parsed.get("label")
+                reasoning = parsed.get("reasoning", "")
+        except Exception:
+            label = None
+            reasoning = None
+
+        # Fallback parsing (line-based)
+        if not label:
+            for line in raw.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                lower = line.lower()
+                if lower.startswith("label:"):
+                    label = line.split(":", 1)[1].strip().strip('"')
+                elif lower.startswith("reasoning:") or lower.startswith("explanation:"):
+                    reasoning = line.split(":", 1)[1].strip().strip('"')
+
+        # If we still have no reasoning but have raw, set it to raw
+        if not reasoning:
+            reasoning = raw.strip()
+
+        # Validate label
+        if not isinstance(label, str) or label not in VALID_LABELS:
+            final_label = "unknown"
+        else:
+            final_label = label
+
+        return {"label": final_label, "reasoning": reasoning}
+
+    except Exception as e:
+        # On any error, return unknown and include a short error message
+        snippet = ""
+        try:
+            snippet = raw[:200]
+        except Exception:
+            snippet = "(no raw response)"
+        return {"label": "unknown", "reasoning": f"error: {e}; raw: {snippet}"}
